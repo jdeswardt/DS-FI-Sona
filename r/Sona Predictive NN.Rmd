@@ -9,18 +9,20 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+Read in the data and extract meta fields
+
 ```{r echo=FALSE}
+
 library(tidyverse)
 
+# extract the filenames
 txt_files <- list.files("../data/")
-
 sona <- data.frame(filename = as.character(), speech = as.character())
 for(i in txt_files){
   file_name <- paste0("../data/", i)
   
   # import text as single character string (can also read.table but the "seperator" causes problems)
-  this_speech <- readChar(file_name, 
-                          nchars = file.info(file_name)$size)
+  this_speech <- readChar(file_name, nchars = file.info(file_name)$size)
   
   # make data frame with metadata (filename contains year and pres) and speech
   this_sona <- data.frame(filename = i, speech = this_speech, stringsAsFactors = FALSE)
@@ -29,33 +31,25 @@ for(i in txt_files){
   sona <- rbind(sona, this_sona)
 }
 
-# extract year, testing
-#str_extract(sona$filename, "[0-9]")
-#str_extract_all(sona$filename, "[0-90-90-90-9]")
-#str_extract_all(sona$filename, "[0-9][0-9][0-9][0-9]")
-#str_extract_all(sona$filename, "[0-9][0-9][0-9][0-9]", simplify = T)
-#str_extract(sona$filename, "[0-9]{4}")
-
-# does the same thing
-#str_sub(sona$filename, start = 1, end = 4)
-
+# extract year
 sona$year <- str_sub(sona$filename, start = 1, end = 4)
 
-# Extract president name
-sona$president <- sub('.*_', '', sona$filename)
-sona$president <- sub('*.txt', '', sona$president)
+# extract president name
+sona$which_pres <- sub('.*_', '', sona$filename)
+sona$which_pres <- sub('*.txt', '', sona$which_pres)
+```
+
+Pre-process for neural net
+
+```{r echo=FALSE}
 
 # pre-processing data to get into right format for neural nets
 
 library(tidytext)
 
-# unnest_tokens is very useful, can split into words, sentences, lines, paragraphs, etc
 
 # word tokenization
 sona %>% unnest_tokens(text, speech, token = "words")
-
-
-#tidy_sona <- sona %>% unnest_tokens(text, speech, token = "sentences")
 
 tidy_sona <- sona %>% unnest_tokens(word, speech, token = "words", to_lower = T) %>% 
   filter(!word %in% stop_words$word) 
@@ -63,7 +57,7 @@ tidy_sona <- sona %>% unnest_tokens(word, speech, token = "words", to_lower = T)
 word_counts <- tidy_sona %>% group_by(filename, word) %>% count() 
 
 # we want to predict sentences, so we need to first split into sentences
-# Add an ID variable for sentences and tokenize each sentence by words
+# add an ID variable for sentences and tokenize each sentence by words
 tidy_sentences <- sona %>% 
   unnest_tokens(sentence, speech, token = "sentences", to_lower = T) %>%
   rowid_to_column("ID")
@@ -72,13 +66,126 @@ tidy_words <- tidy_sentences %>%
   unnest_tokens(word, sentence, token = "words", to_lower = T) %>% 
   filter(!word %in% stop_words$word) 
 
-# Count how many times each word was used in each sentence
-sentence_counts <- tidy_words %>% group_by(ID, word) %>% count() 
+# count how many times each word was used in each sentence
+sentence_counts <- tidy_words %>% 
+  group_by(ID, which_pres, word) %>% 
+  count()
 
-# exercise: reshape long to wide to get into usual format for predictive models 
+# reshape long to wide to get into usual format for predictive models 
 # using "spread"
+sentence_wide <- sentence_counts %>%
+  spread(key = word, value = n)
 
 
+head(sentence_wide)
 
+```
+
+```{r echo=FALSE}
+library(keras)
+install_keras(method = "conda")
+
+```
+
+```{r echo=FALSE}
+nrows <- nrow(sentence_wide)
+ncols <- ncol(sentence_wide)
+
+#Create a set of index values to be used to split the dataset into train and test
+set.seed(123)
+train <- sample(1:nrows,size=nrows*0.8, replace=FALSE)
+pres_col <- which( colnames(sentence_wide)=="which_pres" )
+
+# isolate the response variable and separate into test and train
+# use a lookup function for the column number for the president label
+y_train <- as.matrix(sentence_wide[train,pres_col], ncol = 1)
+y_test <- as.matrix(sentence_wide[-train,pres_col], ncol = 1)
+
+# one hot encoding for response variable
+#y_train <- to_categorical(y_train, 6)
+#y_test <- to_categorical(y_test, 6)
+
+library(listarrays)
+y_train <- onehot(y_train)
+y_test <- onehot(y_test)
+
+# drop the response varaible 
+sentence_wide <- sentence_wide[,-pres_col]
+
+#and separate the predictor variables into test and train datasets
+x_train <- as.matrix(sentence_wide[train,1:(ncols-1)], ncol = (ncols-1))
+x_test <- as.matrix(sentence_wide[-train,1:(ncols-1)], ncol = (ncols-1))
+
+```
+
+```{r echo=FALSE}
+
+set.seed(123)
+
+model <- keras_model_sequential()
+
+```
+
+#### Define the model
+
+```{r echo=FALSE}
+
+model %>% 
+  layer_dense(units = 256, activation = 'relu', input_shape = c(ncols-1)) %>% 
+  layer_dropout(rate = 0.4) %>% 
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dropout(rate = 0.3) %>%
+#  layer_dense(units = 64, activation = 'relu') %>%
+#  layer_dropout(rate = 0) %>%
+  layer_dense(units = 6, activation = 'softmax')
+
+
+```
+
+```{r echo=FALSE}
+
+summary(model)
+```
+
+#### Compile the model
+
+```{r echo=FALSE}
+
+model %>% compile(
+  loss = 'categorical_crossentropy',
+  optimizer = 'rmsprop',
+  metrics = c('accuracy')
+)
+
+```
+
+#### Train the model
+
+```{r echo=FALSE}
+
+set.seed(123)
+
+history <- model %>% fit(
+  x_train, y_train, 
+  epochs = 50, batch_size = 32, 
+  validation_split = 0.2
+)
+
+```
+
+```{r echo=FALSE}
+plot(history)
+
+```
+
+#### Evaluate the model
+
+
+```{r}
+model %>% evaluate(x_test, y_test)
+```
+
+
+```{r echo=FALSE}
 
 ```
