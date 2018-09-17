@@ -1,6 +1,5 @@
 ---
 title: "Text analysis of SONA speeches"
-author: "Jaco de Swardt"
 date: "9/3/2018"
 output: html_document
 ---
